@@ -3,27 +3,30 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    // Helper function to check if user is authenticated
+    // ============================================
+    // HELPER FUNCTIONS
+    // ============================================
+
     function isAuthenticated() {
       return request.auth != null;
     }
 
-    // Helper function to check if user owns this document
     function isOwner(userId) {
       return isAuthenticated() && request.auth.uid == userId;
     }
 
-    // Helper function to get user's role from their profile
     function getUserRole() {
       return get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role;
     }
 
-    // Helper function to check if user is admin
     function isAdmin() {
       return isAuthenticated() && getUserRole() == 'admin';
     }
 
-    // User profiles
+    // ============================================
+    // USER PROFILES
+    // ============================================
+
     match /users/{userId} {
       allow read: if isOwner(userId) || isAdmin();
       allow create: if false; // Only Cloud Functions
@@ -32,19 +35,63 @@ service cloud.firestore {
       allow delete: if false;
     }
 
-    // Reports - admin read only, Cloud Functions write
+    // ============================================
+    // STUDENTS (FERPA-Protected)
+    // ============================================
+
+    match /students/{studentId} {
+      // Only creator or admin can read
+      allow read: if isAuthenticated()
+        && (resource.data.createdBy == request.auth.uid || isAdmin());
+
+      // All writes go through Cloud Functions for audit logging
+      allow create, update, delete: if false;
+    }
+
+    // ============================================
+    // ASSESSMENTS
+    // ============================================
+
+    match /assessments/{assessmentId} {
+      // Read: must own the related student
+      allow read: if isAuthenticated()
+        && get(/databases/$(database)/documents/students/$(resource.data.studentId)).data.createdBy == request.auth.uid;
+
+      // All writes through Cloud Functions
+      allow create, update, delete: if false;
+    }
+
+    // ============================================
+    // EVALUATION REPORTS
+    // ============================================
+
+    match /evaluationReports/{reportId} {
+      // Read: must own the related student
+      allow read: if isAuthenticated()
+        && get(/databases/$(database)/documents/students/$(resource.data.studentId)).data.createdBy == request.auth.uid;
+
+      // All writes through Cloud Functions
+      allow create, update, delete: if false;
+    }
+
+    // ============================================
+    // SYSTEM COLLECTIONS (Admin Only)
+    // ============================================
+
     match /reports/{reportId} {
       allow read: if isAdmin();
-      allow write: if false; // Only Cloud Functions
+      allow write: if false;
     }
 
-    // Metrics - admin read only, Cloud Functions write
     match /metrics/{metricId} {
       allow read: if isAdmin();
-      allow write: if false; // Only Cloud Functions
+      allow write: if false;
     }
 
-    // Default deny
+    // ============================================
+    // DEFAULT DENY
+    // ============================================
+
     match /{document=**} {
       allow read, write: if false;
     }

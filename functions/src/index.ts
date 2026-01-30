@@ -468,3 +468,509 @@ export const runScheduledJob = functions.https.onCall(async (data, context) => {
 
   return { success: true, jobName, message: "Job executed" };
 });
+
+// ============================================
+// STUDENT CRUD ENDPOINTS (FERPA-Compliant)
+// ============================================
+
+// Create a new student record
+export const createStudent = functions.https.onCall(async (data, context) => {
+  if (!context.auth) {
+    throw new functions.https.HttpsError("unauthenticated", "You must be logged in.");
+  }
+
+  const { firstName, lastName, dateOfBirth, grade, school, district } = data;
+
+  // Validate required fields
+  if (!firstName || !lastName || !dateOfBirth || !grade) {
+    throw new functions.https.HttpsError(
+      "invalid-argument",
+      "firstName, lastName, dateOfBirth, and grade are required."
+    );
+  }
+
+  const studentData = {
+    firstName,
+    lastName,
+    dateOfBirth,
+    grade,
+    school: school || null,
+    district: district || null,
+    createdBy: context.auth.uid,
+    createdAt: FieldValue.serverTimestamp(),
+    updatedAt: FieldValue.serverTimestamp(),
+    isActive: true,
+    // FERPA: Track all access for compliance
+    accessLog: [{
+      action: "created",
+      by: context.auth.uid,
+      at: new Date().toISOString(),
+    }],
+  };
+
+  const docRef = await db.collection("students").add(studentData);
+
+  functions.logger.info("Student created", {
+    studentId: docRef.id,
+    createdBy: context.auth.uid,
+    district,
+  });
+
+  return { success: true, studentId: docRef.id };
+});
+
+// Get students for the current user (with pagination)
+export const getStudents = functions.https.onCall(async (data, context) => {
+  if (!context.auth) {
+    throw new functions.https.HttpsError("unauthenticated", "You must be logged in.");
+  }
+
+  const limit = Math.min(data.limit || 25, 100);
+  const offset = data.offset || 0;
+
+  // Users only see students they created (data isolation)
+  let query = db
+    .collection("students")
+    .where("createdBy", "==", context.auth.uid)
+    .where("isActive", "==", true)
+    .orderBy("createdAt", "desc")
+    .limit(limit);
+
+  if (offset > 0) {
+    const offsetSnapshot = await db
+      .collection("students")
+      .where("createdBy", "==", context.auth.uid)
+      .where("isActive", "==", true)
+      .orderBy("createdAt", "desc")
+      .limit(offset)
+      .get();
+
+    if (offsetSnapshot.docs.length > 0) {
+      const lastDoc = offsetSnapshot.docs[offsetSnapshot.docs.length - 1];
+      query = query.startAfter(lastDoc);
+    }
+  }
+
+  const snapshot = await query.get();
+
+  const students = snapshot.docs.map((doc) => ({
+    id: doc.id,
+    ...doc.data(),
+    // Remove access log from response (internal only)
+    accessLog: undefined,
+  }));
+
+  functions.logger.info("getStudents called", {
+    uid: context.auth.uid,
+    count: students.length,
+  });
+
+  return { students, count: students.length };
+});
+
+// Get a single student by ID
+export const getStudent = functions.https.onCall(async (data, context) => {
+  if (!context.auth) {
+    throw new functions.https.HttpsError("unauthenticated", "You must be logged in.");
+  }
+
+  const { studentId } = data;
+
+  if (!studentId) {
+    throw new functions.https.HttpsError("invalid-argument", "studentId is required.");
+  }
+
+  const studentDoc = await db.collection("students").doc(studentId).get();
+
+  if (!studentDoc.exists) {
+    throw new functions.https.HttpsError("not-found", "Student not found.");
+  }
+
+  const studentData = studentDoc.data();
+
+  // Security: Only allow access to own students (or admin)
+  const callerDoc = await db.collection("users").doc(context.auth.uid).get();
+  const callerRole = callerDoc.data()?.role;
+
+  if (studentData?.createdBy !== context.auth.uid && callerRole !== "admin") {
+    functions.logger.warn("Unauthorized student access attempt", {
+      uid: context.auth.uid,
+      studentId,
+    });
+    throw new functions.https.HttpsError("permission-denied", "Access denied.");
+  }
+
+  // FERPA: Log access
+  await db.collection("students").doc(studentId).update({
+    accessLog: FieldValue.arrayUnion({
+      action: "viewed",
+      by: context.auth.uid,
+      at: new Date().toISOString(),
+    }),
+  });
+
+  functions.logger.info("Student accessed", {
+    studentId,
+    accessedBy: context.auth.uid,
+  });
+
+  return {
+    id: studentDoc.id,
+    ...studentData,
+    accessLog: undefined, // Don't expose log to client
+  };
+});
+
+// Update a student record
+export const updateStudent = functions.https.onCall(async (data, context) => {
+  if (!context.auth) {
+    throw new functions.https.HttpsError("unauthenticated", "You must be logged in.");
+  }
+
+  const { studentId, ...updateFields } = data;
+
+  if (!studentId) {
+    throw new functions.https.HttpsError("invalid-argument", "studentId is required.");
+  }
+
+  const studentDoc = await db.collection("students").doc(studentId).get();
+
+  if (!studentDoc.exists) {
+    throw new functions.https.HttpsError("not-found", "Student not found.");
+  }
+
+  // Security: Only owner can update
+  if (studentDoc.data()?.createdBy !== context.auth.uid) {
+    throw new functions.https.HttpsError("permission-denied", "Access denied.");
+  }
+
+  // Whitelist allowed fields
+  const allowedFields = ["firstName", "lastName", "dateOfBirth", "grade", "school", "district"];
+  const updates: Record<string, unknown> = {};
+
+  for (const field of allowedFields) {
+    if (updateFields[field] !== undefined) {
+      updates[field] = updateFields[field];
+    }
+  }
+
+  if (Object.keys(updates).length === 0) {
+    throw new functions.https.HttpsError("invalid-argument", "No valid fields to update.");
+  }
+
+  updates.updatedAt = FieldValue.serverTimestamp();
+  updates.accessLog = FieldValue.arrayUnion({
+    action: "updated",
+    by: context.auth.uid,
+    at: new Date().toISOString(),
+    fields: Object.keys(updates).filter(f => f !== "accessLog" && f !== "updatedAt"),
+  });
+
+  await db.collection("students").doc(studentId).update(updates);
+
+  functions.logger.info("Student updated", {
+    studentId,
+    updatedBy: context.auth.uid,
+    fields: Object.keys(updates),
+  });
+
+  return { success: true, studentId, updatedFields: Object.keys(updates) };
+});
+
+// Soft delete a student (FERPA: maintain records)
+export const deleteStudent = functions.https.onCall(async (data, context) => {
+  if (!context.auth) {
+    throw new functions.https.HttpsError("unauthenticated", "You must be logged in.");
+  }
+
+  const { studentId } = data;
+
+  if (!studentId) {
+    throw new functions.https.HttpsError("invalid-argument", "studentId is required.");
+  }
+
+  const studentDoc = await db.collection("students").doc(studentId).get();
+
+  if (!studentDoc.exists) {
+    throw new functions.https.HttpsError("not-found", "Student not found.");
+  }
+
+  if (studentDoc.data()?.createdBy !== context.auth.uid) {
+    throw new functions.https.HttpsError("permission-denied", "Access denied.");
+  }
+
+  // Soft delete - FERPA requires record retention
+  await db.collection("students").doc(studentId).update({
+    isActive: false,
+    deletedAt: FieldValue.serverTimestamp(),
+    deletedBy: context.auth.uid,
+    accessLog: FieldValue.arrayUnion({
+      action: "deleted",
+      by: context.auth.uid,
+      at: new Date().toISOString(),
+    }),
+  });
+
+  functions.logger.info("Student soft-deleted", {
+    studentId,
+    deletedBy: context.auth.uid,
+  });
+
+  return { success: true, studentId };
+});
+
+// ============================================
+// ASSESSMENT CRUD ENDPOINTS
+// ============================================
+
+// Create an assessment for a student
+export const createAssessment = functions.https.onCall(async (data, context) => {
+  if (!context.auth) {
+    throw new functions.https.HttpsError("unauthenticated", "You must be logged in.");
+  }
+
+  const { studentId, assessmentType, scores, observations, administeredDate } = data;
+
+  if (!studentId || !assessmentType) {
+    throw new functions.https.HttpsError(
+      "invalid-argument",
+      "studentId and assessmentType are required."
+    );
+  }
+
+  // Verify student exists and user has access
+  const studentDoc = await db.collection("students").doc(studentId).get();
+  if (!studentDoc.exists || studentDoc.data()?.createdBy !== context.auth.uid) {
+    throw new functions.https.HttpsError("permission-denied", "Access denied to student.");
+  }
+
+  const assessmentData = {
+    studentId,
+    assessmentType,
+    scores: scores || {},
+    observations: observations || null,
+    administeredDate: administeredDate || new Date().toISOString(),
+    administeredBy: context.auth.uid,
+    createdAt: FieldValue.serverTimestamp(),
+    updatedAt: FieldValue.serverTimestamp(),
+    status: "draft", // draft, completed, reviewed
+  };
+
+  const docRef = await db.collection("assessments").add(assessmentData);
+
+  functions.logger.info("Assessment created", {
+    assessmentId: docRef.id,
+    studentId,
+    assessmentType,
+    createdBy: context.auth.uid,
+  });
+
+  return { success: true, assessmentId: docRef.id };
+});
+
+// Get assessments for a student
+export const getAssessments = functions.https.onCall(async (data, context) => {
+  if (!context.auth) {
+    throw new functions.https.HttpsError("unauthenticated", "You must be logged in.");
+  }
+
+  const { studentId } = data;
+
+  if (!studentId) {
+    throw new functions.https.HttpsError("invalid-argument", "studentId is required.");
+  }
+
+  // Verify student access
+  const studentDoc = await db.collection("students").doc(studentId).get();
+  if (!studentDoc.exists || studentDoc.data()?.createdBy !== context.auth.uid) {
+    throw new functions.https.HttpsError("permission-denied", "Access denied to student.");
+  }
+
+  const snapshot = await db
+    .collection("assessments")
+    .where("studentId", "==", studentId)
+    .orderBy("createdAt", "desc")
+    .get();
+
+  const assessments = snapshot.docs.map((doc) => ({
+    id: doc.id,
+    ...doc.data(),
+  }));
+
+  return { assessments, count: assessments.length };
+});
+
+// Update assessment status
+export const updateAssessment = functions.https.onCall(async (data, context) => {
+  if (!context.auth) {
+    throw new functions.https.HttpsError("unauthenticated", "You must be logged in.");
+  }
+
+  const { assessmentId, scores, observations, status } = data;
+
+  if (!assessmentId) {
+    throw new functions.https.HttpsError("invalid-argument", "assessmentId is required.");
+  }
+
+  const assessmentDoc = await db.collection("assessments").doc(assessmentId).get();
+  if (!assessmentDoc.exists) {
+    throw new functions.https.HttpsError("not-found", "Assessment not found.");
+  }
+
+  // Verify ownership through student
+  const studentDoc = await db.collection("students").doc(assessmentDoc.data()?.studentId).get();
+  if (!studentDoc.exists || studentDoc.data()?.createdBy !== context.auth.uid) {
+    throw new functions.https.HttpsError("permission-denied", "Access denied.");
+  }
+
+  const updates: Record<string, unknown> = { updatedAt: FieldValue.serverTimestamp() };
+  if (scores !== undefined) updates.scores = scores;
+  if (observations !== undefined) updates.observations = observations;
+  if (status !== undefined && ["draft", "completed", "reviewed"].includes(status)) {
+    updates.status = status;
+  }
+
+  await db.collection("assessments").doc(assessmentId).update(updates);
+
+  functions.logger.info("Assessment updated", {
+    assessmentId,
+    updatedBy: context.auth.uid,
+  });
+
+  return { success: true, assessmentId };
+});
+
+// ============================================
+// EVALUATION REPORT ENDPOINTS
+// ============================================
+
+// Generate an evaluation report for a student
+export const createEvaluationReport = functions.https.onCall(async (data, context) => {
+  if (!context.auth) {
+    throw new functions.https.HttpsError("unauthenticated", "You must be logged in.");
+  }
+
+  const { studentId, reportType, summary, recommendations } = data;
+
+  if (!studentId || !reportType) {
+    throw new functions.https.HttpsError(
+      "invalid-argument",
+      "studentId and reportType are required."
+    );
+  }
+
+  // Verify student access
+  const studentDoc = await db.collection("students").doc(studentId).get();
+  if (!studentDoc.exists || studentDoc.data()?.createdBy !== context.auth.uid) {
+    throw new functions.https.HttpsError("permission-denied", "Access denied to student.");
+  }
+
+  // Get all completed assessments for the student
+  const assessmentsSnapshot = await db
+    .collection("assessments")
+    .where("studentId", "==", studentId)
+    .where("status", "==", "completed")
+    .get();
+
+  const assessmentIds = assessmentsSnapshot.docs.map((doc) => doc.id);
+
+  const reportData = {
+    studentId,
+    reportType, // e.g., "initial-evaluation", "re-evaluation", "progress-report"
+    summary: summary || null,
+    recommendations: recommendations || [],
+    assessmentIds,
+    assessmentCount: assessmentIds.length,
+    createdBy: context.auth.uid,
+    createdAt: FieldValue.serverTimestamp(),
+    updatedAt: FieldValue.serverTimestamp(),
+    status: "draft", // draft, review, finalized
+    version: 1,
+  };
+
+  const docRef = await db.collection("evaluationReports").add(reportData);
+
+  functions.logger.info("Evaluation report created", {
+    reportId: docRef.id,
+    studentId,
+    reportType,
+    assessmentCount: assessmentIds.length,
+    createdBy: context.auth.uid,
+  });
+
+  return { success: true, reportId: docRef.id, assessmentCount: assessmentIds.length };
+});
+
+// Get evaluation reports for a student
+export const getEvaluationReports = functions.https.onCall(async (data, context) => {
+  if (!context.auth) {
+    throw new functions.https.HttpsError("unauthenticated", "You must be logged in.");
+  }
+
+  const { studentId } = data;
+
+  if (!studentId) {
+    throw new functions.https.HttpsError("invalid-argument", "studentId is required.");
+  }
+
+  // Verify student access
+  const studentDoc = await db.collection("students").doc(studentId).get();
+  if (!studentDoc.exists || studentDoc.data()?.createdBy !== context.auth.uid) {
+    throw new functions.https.HttpsError("permission-denied", "Access denied to student.");
+  }
+
+  const snapshot = await db
+    .collection("evaluationReports")
+    .where("studentId", "==", studentId)
+    .orderBy("createdAt", "desc")
+    .get();
+
+  const reports = snapshot.docs.map((doc) => ({
+    id: doc.id,
+    ...doc.data(),
+  }));
+
+  return { reports, count: reports.length };
+});
+
+// Finalize a report (locks it from further edits)
+export const finalizeReport = functions.https.onCall(async (data, context) => {
+  if (!context.auth) {
+    throw new functions.https.HttpsError("unauthenticated", "You must be logged in.");
+  }
+
+  const { reportId } = data;
+
+  if (!reportId) {
+    throw new functions.https.HttpsError("invalid-argument", "reportId is required.");
+  }
+
+  const reportDoc = await db.collection("evaluationReports").doc(reportId).get();
+  if (!reportDoc.exists) {
+    throw new functions.https.HttpsError("not-found", "Report not found.");
+  }
+
+  // Verify ownership through student
+  const studentDoc = await db.collection("students").doc(reportDoc.data()?.studentId).get();
+  if (!studentDoc.exists || studentDoc.data()?.createdBy !== context.auth.uid) {
+    throw new functions.https.HttpsError("permission-denied", "Access denied.");
+  }
+
+  if (reportDoc.data()?.status === "finalized") {
+    throw new functions.https.HttpsError("failed-precondition", "Report is already finalized.");
+  }
+
+  await db.collection("evaluationReports").doc(reportId).update({
+    status: "finalized",
+    finalizedAt: FieldValue.serverTimestamp(),
+    finalizedBy: context.auth.uid,
+    updatedAt: FieldValue.serverTimestamp(),
+  });
+
+  functions.logger.info("Report finalized", {
+    reportId,
+    finalizedBy: context.auth.uid,
+  });
+
+  return { success: true, reportId, status: "finalized" };
+});
