@@ -1,186 +1,28 @@
-# SageReport Backend API
+# Feedback
 
 [![Firebase](https://img.shields.io/badge/Firebase-FFCA28?style=for-the-badge&logo=firebase&logoColor=black)](https://firebase.google.com/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?style=for-the-badge&logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
-[![Cloud Functions](https://img.shields.io/badge/Cloud%20Functions-4285F4?style=for-the-badge&logo=google-cloud&logoColor=white)](https://cloud.google.com/functions)
-[![License](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)](LICENSE)
 
-> Production-ready backend API for school psychology evaluation management, built on Firebase/Google Cloud Platform.
-
----
-
-## Live Demo
-
-| Endpoint | Status |
-|----------|--------|
-| [Health Check](https://us-central1-sagereportdemoapp.cloudfunctions.net/healthCheck) | ![Status](https://img.shields.io/badge/status-live-brightgreen) |
+> Anonymous feedback collection platform. Create forms, share links, collect honest responses.
 
 ---
 
 ## Features
 
-### Security & Authentication
-- Firebase Authentication (Email/Password, OAuth-ready)
-- Role-Based Access Control (user / moderator / admin)
-- Field-level security with whitelist pattern
-- Defense in depth (Functions + Firestore rules)
-
-### FERPA Compliance
-- Access logging on every student record view
-- Soft deletes (data retention)
-- Data isolation (users only see their own students)
-- Ownership verification on all operations
-
-### Automated Operations
-| Job | Schedule | Purpose |
-|-----|----------|---------|
-| `dailyUserReport` | 6 AM daily | User metrics & activity stats |
-| `weeklyCleanup` | 2 AM Sundays | Archive inactive users |
-| `hourlyMetrics` | Every hour | System health snapshots |
-
-### API Endpoints
-
-```
-Authentication
-├── healthCheck          GET   Public health endpoint
-├── onUserCreated        AUTH  Auto-creates user profile
-└── onUserDeleted        AUTH  Soft-delete on account removal
-
-User Management
-├── getUserProfile       POST  Get current user's profile
-├── updateUserProfile    POST  Update allowed fields only
-├── listUsers            POST  Admin: list all users
-└── updateUserRole       POST  Admin: change user roles
-
-Students (CRUD)
-├── createStudent        POST  Create student record
-├── getStudents          POST  List user's students
-├── getStudent           POST  Get single student + log access
-├── updateStudent        POST  Update allowed fields
-└── deleteStudent        POST  Soft delete (FERPA)
-
-Assessments
-├── createAssessment     POST  Add assessment to student
-├── getAssessments       POST  List assessments for student
-└── updateAssessment     POST  Update scores/status
-
-Evaluation Reports
-├── createEvaluationReport   POST  Generate report
-├── getEvaluationReports     POST  List reports for student
-└── finalizeReport           POST  Lock report from editing
-```
+- **Create Feedback Forms** - Sign up and create custom feedback forms with configurable options
+- **Share via Link or QR Code** - Each form gets a unique URL and shareable QR code
+- **Anonymous Submissions** - Respondents submit feedback without any tracking
+- **Private Dashboard** - Only you can see responses to your forms
+- **Category Support** - Optionally require respondents to categorize their feedback
 
 ---
 
-## Load Test Results
+## How It Works
 
-Real production load test using [Grafana K6](https://k6.io/):
-
-```
-══════════════════════════════════════════════════════════════
-           SAGEREPORT API LOAD TEST RESULTS
-══════════════════════════════════════════════════════════════
-
-  Total HTTP Requests:    2,695
-  Requests/sec:           66.96
-
-  Response Times:
-    Average:              62ms
-    Median:               53ms
-    95th Percentile:      82ms
-    Max:                  2,780ms (cold start)
-
-  Error Rate:             0.00%
-
-══════════════════════════════════════════════════════════════
-```
-
-**Key Takeaways:**
-- Zero errors under load
-- 95% of requests under 82ms
-- Auto-scaling handled 50 concurrent users instantly
-- No server configuration required
-
----
-
-## Architecture
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    Client Applications                       │
-│              (Web App, Mobile App, Admin Portal)             │
-└──────────────────────────┬──────────────────────────────────┘
-                           │
-                           ▼
-┌─────────────────────────────────────────────────────────────┐
-│                  Firebase Authentication                     │
-│               (Email/Password, OAuth, SSO)                   │
-└──────────────────────────┬──────────────────────────────────┘
-                           │
-                           ▼
-┌─────────────────────────────────────────────────────────────┐
-│                   Cloud Functions API                        │
-│    ┌───────────┐  ┌───────────┐  ┌───────────────────┐     │
-│    │   Auth    │  │   CRUD    │  │  Scheduled Jobs   │     │
-│    │ Triggers  │  │ Endpoints │  │    (Webjobs)      │     │
-│    └───────────┘  └───────────┘  └───────────────────┘     │
-└──────────────────────────┬──────────────────────────────────┘
-                           │
-                           ▼
-┌─────────────────────────────────────────────────────────────┐
-│                    Cloud Firestore                           │
-│  ┌───────┐ ┌──────────┐ ┌─────────────┐ ┌───────────────┐  │
-│  │ users │ │ students │ │ assessments │ │ evalReports   │  │
-│  └───────┘ └──────────┘ └─────────────┘ └───────────────┘  │
-└─────────────────────────────────────────────────────────────┘
-```
-
----
-
-## Quick Start
-
-### Prerequisites
-- Node.js 18+
-- Firebase CLI (`npm install -g firebase-tools`)
-
-### Setup
-```bash
-# Clone the repository
-git clone https://github.com/hollidaydds/Firebase-Demo.git
-cd Firebase-Demo
-
-# Install dependencies
-cd functions && npm install
-
-# Login to Firebase
-firebase login
-
-# Start local emulators
-firebase emulators:start
-```
-
-### Deploy to Production
-```bash
-firebase deploy --only functions
-```
-
----
-
-## Security Highlights
-
-### Privilege Escalation Prevention
-```typescript
-// Whitelist pattern - only these fields can be updated
-const allowedFields = ["displayName", "photoURL", "preferences"];
-
-// "role" field is NEVER allowed - silently ignored
-```
-
-### Defense in Depth
-1. **Authentication Layer** - Firebase Auth verifies identity
-2. **Authorization Layer** - Cloud Functions check roles
-3. **Data Layer** - Firestore rules enforce access
-4. **Application Layer** - Field whitelisting, input validation
+1. **Sign up** with email/password
+2. **Create a form** with a title and optional description
+3. **Share the link** with anyone you want feedback from
+4. **View responses** in your private dashboard
 
 ---
 
@@ -188,33 +30,112 @@ const allowedFields = ["displayName", "photoURL", "preferences"];
 
 | Layer | Technology |
 |-------|------------|
-| Runtime | Node.js 18 |
-| Language | TypeScript |
-| Functions | Firebase Cloud Functions (2nd Gen) |
+| Frontend | HTML/CSS/JavaScript |
+| Backend | Firebase Cloud Functions (TypeScript) |
 | Database | Cloud Firestore |
 | Auth | Firebase Authentication |
-| Scheduling | Cloud Scheduler |
-| Hosting | Google Cloud Platform |
+| Hosting | Firebase Hosting |
 
 ---
 
-## Cost Estimate
+## API Endpoints
 
-| Service | Free Tier | Production (~10K users) |
-|---------|-----------|------------------------|
-| Cloud Functions | 2M invocations/month | ~$20/month |
-| Firestore | 1GB storage | ~$25/month |
-| Authentication | 50K MAU | $0 |
-| **Total** | **$0** | **~$50/month** |
+### Authenticated (Firebase Callable)
+```
+User Management
+├── getUserProfile       Get current user's profile
+└── updateUserProfile    Update display name/photo
+
+Feedback Forms
+├── createFeedbackForm   Create a new form
+├── getFeedbackForms     List your forms
+├── getFeedbackForm      Get form details
+└── deleteFeedbackForm   Delete a form
+
+Responses
+├── getFeedbackResponses Get responses for a form
+└── deleteFeedbackResponse Delete a response
+```
+
+### Public (HTTP)
+```
+├── GET  /api/form?code=xxx    Get form info for submission
+├── POST /api/submit           Submit anonymous feedback
+└── GET  /api/health           Health check
+```
+
+---
+
+## Setup
+
+### Prerequisites
+- Node.js 18+
+- Firebase CLI (`npm install -g firebase-tools`)
+
+### Local Development
+
+```bash
+# Install dependencies
+cd functions && npm install
+
+# Start emulators
+firebase emulators:start
+```
+
+### Configuration
+
+1. Create a Firebase project at [console.firebase.google.com](https://console.firebase.google.com)
+2. Enable **Authentication** (Email/Password)
+3. Enable **Firestore Database**
+4. Update `public/js/app.js` with your Firebase config
+5. Update `.firebaserc` with your project ID
+
+### Deploy
+
+```bash
+# Deploy everything
+firebase deploy
+
+# Deploy only functions
+firebase deploy --only functions
+
+# Deploy only hosting
+firebase deploy --only hosting
+```
+
+---
+
+## Project Structure
+
+```
+├── functions/
+│   └── src/
+│       └── index.ts      # Cloud Functions (API)
+├── public/
+│   ├── index.html        # Single-page app
+│   ├── css/styles.css    # Styling
+│   └── js/app.js         # Frontend logic
+├── firebase.json         # Firebase config
+├── firestore.rules       # Security rules
+└── .firebaserc           # Project ID
+```
+
+---
+
+## Security
+
+- **Authentication Required** - Only logged-in users can create forms and view responses
+- **Anonymous Submissions** - No IP logging, no tracking, no identifying info stored
+- **Owner-Only Access** - Users can only see their own forms and responses
+- **Cloud Functions** - All sensitive operations go through server-side validation
+- **Firestore Rules** - Database-level security as backup
 
 ---
 
 ## License
 
-MIT License - see [LICENSE](LICENSE) for details.
+MIT
 
 ---
 
-<p align="center">
-  Built with Firebase by <a href="https://github.com/hollidaydds">Ian Hale</a>
-</p>
+Built with Firebase

@@ -15,77 +15,53 @@ service cloud.firestore {
       return isAuthenticated() && request.auth.uid == userId;
     }
 
-    function getUserRole() {
-      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role;
-    }
-
-    function isAdmin() {
-      return isAuthenticated() && getUserRole() == 'admin';
-    }
-
     // ============================================
     // USER PROFILES
     // ============================================
 
     match /users/{userId} {
-      allow read: if isOwner(userId) || isAdmin();
+      allow read: if isOwner(userId);
       allow create: if false; // Only Cloud Functions
       allow update: if isOwner(userId)
-        && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['role', 'uid', 'createdAt', 'isActive']);
+        && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['uid', 'createdAt', 'isActive', 'formsCreated']);
       allow delete: if false;
     }
 
     // ============================================
-    // STUDENTS (FERPA-Protected)
+    // FEEDBACK FORMS
     // ============================================
 
-    match /students/{studentId} {
-      // Only creator or admin can read
-      allow read: if isAuthenticated()
-        && (resource.data.createdBy == request.auth.uid || isAdmin());
+    match /feedbackForms/{formId} {
+      // Owner can read their own forms
+      allow read: if isAuthenticated() && resource.data.createdBy == request.auth.uid;
 
-      // All writes go through Cloud Functions for audit logging
+      // All writes go through Cloud Functions for validation
       allow create, update, delete: if false;
     }
 
     // ============================================
-    // ASSESSMENTS
+    // FEEDBACK RESPONSES
     // ============================================
 
-    match /assessments/{assessmentId} {
-      // Read: must own the related student
+    match /feedbackResponses/{responseId} {
+      // Owner of the form can read responses
       allow read: if isAuthenticated()
-        && get(/databases/$(database)/documents/students/$(resource.data.studentId)).data.createdBy == request.auth.uid;
+        && get(/databases/$(database)/documents/feedbackForms/$(resource.data.formId)).data.createdBy == request.auth.uid;
 
-      // All writes through Cloud Functions
+      // All writes go through Cloud Functions (including anonymous submissions)
       allow create, update, delete: if false;
     }
 
     // ============================================
-    // EVALUATION REPORTS
-    // ============================================
-
-    match /evaluationReports/{reportId} {
-      // Read: must own the related student
-      allow read: if isAuthenticated()
-        && get(/databases/$(database)/documents/students/$(resource.data.studentId)).data.createdBy == request.auth.uid;
-
-      // All writes through Cloud Functions
-      allow create, update, delete: if false;
-    }
-
-    // ============================================
-    // SYSTEM COLLECTIONS (Admin Only)
+    // SYSTEM COLLECTIONS (Cloud Functions Only)
     // ============================================
 
     match /reports/{reportId} {
-      allow read: if isAdmin();
-      allow write: if false;
+      allow read, write: if false;
     }
 
     match /metrics/{metricId} {
-      allow read: if isAdmin();
-      allow write: if false;
+      allow read, write: if false;
     }
 
     // ============================================

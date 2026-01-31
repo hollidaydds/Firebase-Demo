@@ -36,11 +36,11 @@ export const onUserCreated = functions.auth.user().onCreate(async (user) => {
     email: user.email || null,
     displayName: user.displayName || null,
     photoURL: user.photoURL || null,
-    role: "user", // Default role
     createdAt: FieldValue.serverTimestamp(),
     updatedAt: FieldValue.serverTimestamp(),
     lastLoginAt: FieldValue.serverTimestamp(),
     isActive: true,
+    formsCreated: 0,
   };
 
   await db.collection("users").doc(user.uid).set(userProfile);
@@ -101,8 +101,8 @@ export const updateUserProfile = functions.https.onCall(async (data, context) =>
     );
   }
 
-  // Whitelist allowed fields - security best practice
-  const allowedFields = ["displayName", "photoURL", "preferences"];
+  // Whitelist allowed fields
+  const allowedFields = ["displayName", "photoURL"];
   const updates: Record<string, unknown> = {};
 
   for (const field of allowedFields) {
@@ -131,846 +131,491 @@ export const updateUserProfile = functions.https.onCall(async (data, context) =>
 });
 
 // ============================================
-// ADMIN ENDPOINTS (Role-based access)
+// FEEDBACK FORM CRUD (Authenticated Users)
 // ============================================
 
-// Admin-only: List all users
-export const listUsers = functions.https.onCall(async (data, context) => {
+// Generate a unique code for the feedback form
+function generateUniqueCode(): string {
+  const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
+  let code = "";
+  for (let i = 0; i < 8; i++) {
+    code += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return code;
+}
+
+// Create a new feedback form
+export const createFeedbackForm = functions.https.onCall(async (data, context) => {
   if (!context.auth) {
-    throw new functions.https.HttpsError(
-      "unauthenticated",
-      "You must be logged in."
-    );
+    throw new functions.https.HttpsError("unauthenticated", "You must be logged in to create a feedback form.");
   }
 
-  // Check admin role
-  const callerDoc = await db.collection("users").doc(context.auth.uid).get();
-  const callerData = callerDoc.data();
+  const { title, description, allowMultipleResponses, requireCategory, categories } = data;
 
-  if (!callerData || callerData.role !== "admin") {
-    functions.logger.warn("Unauthorized admin access attempt", {
-      uid: context.auth.uid,
-      attemptedAction: "listUsers",
-    });
-    throw new functions.https.HttpsError(
-      "permission-denied",
-      "Admin access required."
-    );
+  if (!title || title.trim().length === 0) {
+    throw new functions.https.HttpsError("invalid-argument", "Title is required.");
   }
 
-  functions.logger.info("Admin listUsers called", { adminUid: context.auth.uid });
+  if (title.length > 200) {
+    throw new functions.https.HttpsError("invalid-argument", "Title must be 200 characters or less.");
+  }
 
-  const limit = Math.min(data.limit || 50, 100); // Cap at 100
-  const usersSnapshot = await db
-    .collection("users")
+  if (description && description.length > 1000) {
+    throw new functions.https.HttpsError("invalid-argument", "Description must be 1000 characters or less.");
+  }
+
+  // Generate unique code and ensure it doesn't exist
+  let uniqueCode = generateUniqueCode();
+  let codeExists = true;
+  let attempts = 0;
+
+  while (codeExists && attempts < 10) {
+    const existingForm = await db.collection("feedbackForms")
+      .where("uniqueCode", "==", uniqueCode)
+      .limit(1)
+      .get();
+
+    if (existingForm.empty) {
+      codeExists = false;
+    } else {
+      uniqueCode = generateUniqueCode();
+      attempts++;
+    }
+  }
+
+  if (codeExists) {
+    throw new functions.https.HttpsError("internal", "Failed to generate unique code. Please try again.");
+  }
+
+  const formData = {
+    uniqueCode,
+    title: title.trim(),
+    description: description?.trim() || null,
+    allowMultipleResponses: allowMultipleResponses || false,
+    requireCategory: requireCategory || false,
+    categories: requireCategory && Array.isArray(categories) ? categories : [],
+    createdBy: context.auth.uid,
+    createdAt: FieldValue.serverTimestamp(),
+    updatedAt: FieldValue.serverTimestamp(),
+    isActive: true,
+    responseCount: 0,
+  };
+
+  const docRef = await db.collection("feedbackForms").add(formData);
+
+  // Increment user's form count (don't fail if user doc doesn't exist)
+  try {
+    await db.collection("users").doc(context.auth.uid).set({
+      formsCreated: FieldValue.increment(1),
+    }, { merge: true });
+  } catch (userUpdateError) {
+    functions.logger.warn("Could not update user form count", { error: userUpdateError });
+  }
+
+  functions.logger.info("Feedback form created", {
+    formId: docRef.id,
+    uniqueCode,
+    createdBy: context.auth.uid,
+  });
+
+  return {
+    success: true,
+    formId: docRef.id,
+    uniqueCode,
+  };
+});
+
+// Get all feedback forms for the current user
+export const getFeedbackForms = functions.https.onCall(async (data, context) => {
+  if (!context.auth) {
+    throw new functions.https.HttpsError("unauthenticated", "You must be logged in.");
+  }
+
+  const limit = Math.min(data?.limit || 50, 100);
+
+  const snapshot = await db
+    .collection("feedbackForms")
+    .where("createdBy", "==", context.auth.uid)
     .where("isActive", "==", true)
     .orderBy("createdAt", "desc")
     .limit(limit)
     .get();
 
-  const users = usersSnapshot.docs.map((doc) => ({
-    uid: doc.id,
+  const forms = snapshot.docs.map((doc) => ({
+    id: doc.id,
     ...doc.data(),
   }));
 
-  return { users, count: users.length };
+  functions.logger.info("getFeedbackForms called", {
+    uid: context.auth.uid,
+    count: forms.length,
+  });
+
+  return { forms, count: forms.length };
 });
 
-// Admin-only: Update user role
-export const updateUserRole = functions.https.onCall(async (data, context) => {
+// Get a single feedback form by ID (for owner)
+export const getFeedbackForm = functions.https.onCall(async (data, context) => {
   if (!context.auth) {
-    throw new functions.https.HttpsError(
-      "unauthenticated",
-      "You must be logged in."
-    );
+    throw new functions.https.HttpsError("unauthenticated", "You must be logged in.");
   }
 
-  const { targetUid, newRole } = data;
+  const { formId } = data;
 
-  if (!targetUid || !newRole) {
-    throw new functions.https.HttpsError(
-      "invalid-argument",
-      "targetUid and newRole are required."
-    );
+  if (!formId) {
+    throw new functions.https.HttpsError("invalid-argument", "formId is required.");
   }
 
-  const validRoles = ["user", "moderator", "admin"];
-  if (!validRoles.includes(newRole)) {
-    throw new functions.https.HttpsError(
-      "invalid-argument",
-      `Invalid role. Must be one of: ${validRoles.join(", ")}`
-    );
+  const formDoc = await db.collection("feedbackForms").doc(formId).get();
+
+  if (!formDoc.exists) {
+    throw new functions.https.HttpsError("not-found", "Feedback form not found.");
   }
 
-  // Check admin role
-  const callerDoc = await db.collection("users").doc(context.auth.uid).get();
-  const callerData = callerDoc.data();
+  const formData = formDoc.data();
 
-  if (!callerData || callerData.role !== "admin") {
-    functions.logger.warn("Unauthorized role change attempt", {
-      uid: context.auth.uid,
-      targetUid,
-      attemptedRole: newRole,
-    });
-    throw new functions.https.HttpsError(
-      "permission-denied",
-      "Admin access required."
-    );
+  // Only owner can get full form details
+  if (formData?.createdBy !== context.auth.uid) {
+    throw new functions.https.HttpsError("permission-denied", "Access denied.");
   }
 
-  functions.logger.info("Admin updateUserRole called", {
-    adminUid: context.auth.uid,
-    targetUid,
-    newRole,
+  return {
+    id: formDoc.id,
+    ...formData,
+  };
+});
+
+// Delete a feedback form (soft delete)
+export const deleteFeedbackForm = functions.https.onCall(async (data, context) => {
+  if (!context.auth) {
+    throw new functions.https.HttpsError("unauthenticated", "You must be logged in.");
+  }
+
+  const { formId } = data;
+
+  if (!formId) {
+    throw new functions.https.HttpsError("invalid-argument", "formId is required.");
+  }
+
+  const formDoc = await db.collection("feedbackForms").doc(formId).get();
+
+  if (!formDoc.exists) {
+    throw new functions.https.HttpsError("not-found", "Feedback form not found.");
+  }
+
+  if (formDoc.data()?.createdBy !== context.auth.uid) {
+    throw new functions.https.HttpsError("permission-denied", "Access denied.");
+  }
+
+  await db.collection("feedbackForms").doc(formId).update({
+    isActive: false,
+    deletedAt: FieldValue.serverTimestamp(),
   });
 
-  await db.collection("users").doc(targetUid).update({
-    role: newRole,
-    updatedAt: FieldValue.serverTimestamp(),
-    updatedBy: context.auth.uid,
+  functions.logger.info("Feedback form deleted", {
+    formId,
+    deletedBy: context.auth.uid,
   });
 
-  return { success: true, targetUid, newRole };
+  return { success: true, formId };
 });
 
 // ============================================
-// SCHEDULED FUNCTIONS (Webjobs)
+// ANONYMOUS FEEDBACK SUBMISSION
 // ============================================
 
-// Daily user metrics report - runs every day at 6:00 AM UTC
-export const dailyUserReport = functions.pubsub
-  .schedule("0 6 * * *") // Cron: minute hour day month weekday
+// Get form info for anonymous users (public endpoint)
+export const getFormForSubmission = functions.https.onRequest(async (req, res) => {
+  // Enable CORS
+  res.set("Access-Control-Allow-Origin", "*");
+  res.set("Access-Control-Allow-Methods", "GET, OPTIONS");
+  res.set("Access-Control-Allow-Headers", "Content-Type");
+
+  if (req.method === "OPTIONS") {
+    res.status(204).send("");
+    return;
+  }
+
+  if (req.method !== "GET") {
+    res.status(405).json({ error: "Method not allowed" });
+    return;
+  }
+
+  const uniqueCode = req.query.code as string;
+
+  if (!uniqueCode) {
+    res.status(400).json({ error: "code parameter is required" });
+    return;
+  }
+
+  const snapshot = await db
+    .collection("feedbackForms")
+    .where("uniqueCode", "==", uniqueCode)
+    .where("isActive", "==", true)
+    .limit(1)
+    .get();
+
+  if (snapshot.empty) {
+    res.status(404).json({ error: "Feedback form not found" });
+    return;
+  }
+
+  const formDoc = snapshot.docs[0];
+  const formData = formDoc.data();
+
+  // Only return public-safe fields
+  res.json({
+    title: formData.title,
+    description: formData.description,
+    requireCategory: formData.requireCategory,
+    categories: formData.categories || [],
+    allowMultipleResponses: formData.allowMultipleResponses,
+  });
+});
+
+// Submit anonymous feedback (public endpoint - no auth required)
+export const submitFeedback = functions.https.onRequest(async (req, res) => {
+  // Enable CORS
+  res.set("Access-Control-Allow-Origin", "*");
+  res.set("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.set("Access-Control-Allow-Headers", "Content-Type");
+
+  if (req.method === "OPTIONS") {
+    res.status(204).send("");
+    return;
+  }
+
+  if (req.method !== "POST") {
+    res.status(405).json({ error: "Method not allowed" });
+    return;
+  }
+
+  const { code, message, category } = req.body;
+
+  if (!code) {
+    res.status(400).json({ error: "code is required" });
+    return;
+  }
+
+  if (!message || message.trim().length === 0) {
+    res.status(400).json({ error: "message is required" });
+    return;
+  }
+
+  if (message.length > 5000) {
+    res.status(400).json({ error: "message must be 5000 characters or less" });
+    return;
+  }
+
+  // Find the form
+  const snapshot = await db
+    .collection("feedbackForms")
+    .where("uniqueCode", "==", code)
+    .where("isActive", "==", true)
+    .limit(1)
+    .get();
+
+  if (snapshot.empty) {
+    res.status(404).json({ error: "Feedback form not found" });
+    return;
+  }
+
+  const formDoc = snapshot.docs[0];
+  const formData = formDoc.data();
+
+  // Validate category if required
+  if (formData.requireCategory) {
+    if (!category || category.trim().length === 0) {
+      res.status(400).json({ error: "category is required for this form" });
+      return;
+    }
+    if (formData.categories?.length > 0 && !formData.categories.includes(category)) {
+      res.status(400).json({ error: "Invalid category" });
+      return;
+    }
+  }
+
+  const responseData = {
+    formId: formDoc.id,
+    message: message.trim(),
+    category: category?.trim() || null,
+    submittedAt: FieldValue.serverTimestamp(),
+    // Explicitly NOT storing IP or any identifying info for anonymity
+  };
+
+  await db.collection("feedbackResponses").add(responseData);
+
+  // Increment response count on the form
+  await db.collection("feedbackForms").doc(formDoc.id).update({
+    responseCount: FieldValue.increment(1),
+    lastResponseAt: FieldValue.serverTimestamp(),
+  });
+
+  functions.logger.info("Anonymous feedback submitted", {
+    formId: formDoc.id,
+    hasCategory: !!category,
+  });
+
+  res.json({ success: true, message: "Feedback submitted successfully" });
+});
+
+// ============================================
+// FEEDBACK RESPONSES (Authenticated - Owner Only)
+// ============================================
+
+// Get all responses for a feedback form
+export const getFeedbackResponses = functions.https.onCall(async (data, context) => {
+  if (!context.auth) {
+    throw new functions.https.HttpsError("unauthenticated", "You must be logged in.");
+  }
+
+  const { formId, limit: requestedLimit } = data;
+
+  if (!formId) {
+    throw new functions.https.HttpsError("invalid-argument", "formId is required.");
+  }
+
+  // Verify form ownership
+  const formDoc = await db.collection("feedbackForms").doc(formId).get();
+
+  if (!formDoc.exists) {
+    throw new functions.https.HttpsError("not-found", "Feedback form not found.");
+  }
+
+  if (formDoc.data()?.createdBy !== context.auth.uid) {
+    throw new functions.https.HttpsError("permission-denied", "Access denied.");
+  }
+
+  const limit = Math.min(requestedLimit || 100, 500);
+
+  const snapshot = await db
+    .collection("feedbackResponses")
+    .where("formId", "==", formId)
+    .orderBy("submittedAt", "desc")
+    .limit(limit)
+    .get();
+
+  const responses = snapshot.docs.map((doc) => ({
+    id: doc.id,
+    ...doc.data(),
+  }));
+
+  functions.logger.info("getFeedbackResponses called", {
+    uid: context.auth.uid,
+    formId,
+    count: responses.length,
+  });
+
+  return { responses, count: responses.length };
+});
+
+// Delete a single feedback response
+export const deleteFeedbackResponse = functions.https.onCall(async (data, context) => {
+  if (!context.auth) {
+    throw new functions.https.HttpsError("unauthenticated", "You must be logged in.");
+  }
+
+  const { responseId } = data;
+
+  if (!responseId) {
+    throw new functions.https.HttpsError("invalid-argument", "responseId is required.");
+  }
+
+  const responseDoc = await db.collection("feedbackResponses").doc(responseId).get();
+
+  if (!responseDoc.exists) {
+    throw new functions.https.HttpsError("not-found", "Response not found.");
+  }
+
+  const responseData = responseDoc.data();
+
+  // Verify ownership through form
+  const formDoc = await db.collection("feedbackForms").doc(responseData?.formId).get();
+
+  if (!formDoc.exists || formDoc.data()?.createdBy !== context.auth.uid) {
+    throw new functions.https.HttpsError("permission-denied", "Access denied.");
+  }
+
+  await db.collection("feedbackResponses").doc(responseId).delete();
+
+  // Decrement response count
+  await db.collection("feedbackForms").doc(responseData?.formId).update({
+    responseCount: FieldValue.increment(-1),
+  });
+
+  functions.logger.info("Feedback response deleted", {
+    responseId,
+    formId: responseData?.formId,
+    deletedBy: context.auth.uid,
+  });
+
+  return { success: true, responseId };
+});
+
+// ============================================
+// SCHEDULED FUNCTIONS
+// ============================================
+
+// Daily metrics report - runs every day at 6:00 AM
+export const dailyMetricsReport = functions.pubsub
+  .schedule("0 6 * * *")
   .timeZone("America/New_York")
   .onRun(async (context) => {
-    functions.logger.info("Daily user report started", {
+    functions.logger.info("Daily metrics report started", {
       scheduledTime: context.timestamp,
     });
 
     const now = new Date();
     const oneDayAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000);
-    const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
 
-    // Get all active users
-    const usersSnapshot = await db
-      .collection("users")
-      .where("isActive", "==", true)
+    // Get counts
+    const usersCount = (await db.collection("users").where("isActive", "==", true).count().get()).data().count;
+    const formsCount = (await db.collection("feedbackForms").where("isActive", "==", true).count().get()).data().count;
+    const responsesCount = (await db.collection("feedbackResponses").count().get()).data().count;
+
+    // New responses in last 24 hours
+    const recentResponses = await db
+      .collection("feedbackResponses")
+      .where("submittedAt", ">", oneDayAgo)
+      .count()
       .get();
-
-    // Calculate metrics
-    let totalUsers = 0;
-    let newUsersLast24h = 0;
-    let activeUsersLast7d = 0;
-    const roleBreakdown: Record<string, number> = {};
-
-    usersSnapshot.docs.forEach((doc) => {
-      const data = doc.data();
-      totalUsers++;
-
-      // Count by role
-      const role = data.role || "unknown";
-      roleBreakdown[role] = (roleBreakdown[role] || 0) + 1;
-
-      // New users in last 24 hours
-      const createdAt = data.createdAt?.toDate?.();
-      if (createdAt && createdAt > oneDayAgo) {
-        newUsersLast24h++;
-      }
-
-      // Active users in last 7 days
-      const lastLogin = data.lastLoginAt?.toDate?.();
-      if (lastLogin && lastLogin > sevenDaysAgo) {
-        activeUsersLast7d++;
-      }
-    });
 
     const report = {
       reportDate: now.toISOString(),
       metrics: {
-        totalUsers,
-        newUsersLast24h,
-        activeUsersLast7d,
-        inactiveUsers: totalUsers - activeUsersLast7d,
-        roleBreakdown,
+        totalUsers: usersCount,
+        totalForms: formsCount,
+        totalResponses: responsesCount,
+        responsesLast24h: recentResponses.data().count,
       },
       generatedAt: FieldValue.serverTimestamp(),
     };
 
-    // Store report in Firestore
     await db.collection("reports").doc(`daily-${now.toISOString().split("T")[0]}`).set(report);
 
-    functions.logger.info("Daily user report completed", {
-      totalUsers,
-      newUsersLast24h,
-      activeUsersLast7d,
-    });
+    functions.logger.info("Daily metrics report completed", report.metrics);
 
     return null;
   });
 
-// Weekly cleanup job - runs every Sunday at 2:00 AM UTC
-export const weeklyCleanup = functions.pubsub
-  .schedule("0 2 * * 0") // Every Sunday at 2 AM
-  .timeZone("America/New_York")
-  .onRun(async (context) => {
-    functions.logger.info("Weekly cleanup started", {
-      scheduledTime: context.timestamp,
-    });
-
-    const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
-    let archivedCount = 0;
-    let deletedReportsCount = 0;
-
-    // Archive users inactive for 30+ days
-    const inactiveUsers = await db
-      .collection("users")
-      .where("isActive", "==", true)
-      .where("lastLoginAt", "<", thirtyDaysAgo)
-      .get();
-
-    const batch = db.batch();
-
-    inactiveUsers.docs.forEach((doc) => {
-      batch.update(doc.ref, {
-        isActive: false,
-        archivedAt: FieldValue.serverTimestamp(),
-        archiveReason: "inactive_30_days",
-      });
-      archivedCount++;
-    });
-
-    // Delete reports older than 90 days
-    const ninetyDaysAgo = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
-    const oldReports = await db
-      .collection("reports")
-      .where("generatedAt", "<", ninetyDaysAgo)
-      .get();
-
-    oldReports.docs.forEach((doc) => {
-      batch.delete(doc.ref);
-      deletedReportsCount++;
-    });
-
-    await batch.commit();
-
-    functions.logger.info("Weekly cleanup completed", {
-      archivedUsers: archivedCount,
-      deletedReports: deletedReportsCount,
-    });
-
-    return null;
-  });
-
-// Hourly health metrics - runs every hour
+// Hourly metrics - runs every hour
 export const hourlyMetrics = functions.pubsub
-  .schedule("0 * * * *") // Every hour on the hour
+  .schedule("0 * * * *")
   .onRun(async (context) => {
     const timestamp = new Date();
 
-    // Collect system metrics
     const metrics = {
       timestamp: timestamp.toISOString(),
       hour: timestamp.getUTCHours(),
       usersCollection: (await db.collection("users").count().get()).data().count,
-      reportsCollection: (await db.collection("reports").count().get()).data().count,
+      formsCollection: (await db.collection("feedbackForms").count().get()).data().count,
+      responsesCollection: (await db.collection("feedbackResponses").count().get()).data().count,
       recordedAt: FieldValue.serverTimestamp(),
     };
 
-    // Store in metrics collection (for monitoring dashboards)
     await db.collection("metrics").add(metrics);
 
     functions.logger.info("Hourly metrics recorded", metrics);
 
     return null;
   });
-
-// ============================================
-// MANUAL TRIGGER FOR TESTING SCHEDULED JOBS
-// ============================================
-
-// HTTP endpoint to manually trigger scheduled jobs (admin only)
-export const runScheduledJob = functions.https.onCall(async (data, context) => {
-  if (!context.auth) {
-    throw new functions.https.HttpsError("unauthenticated", "You must be logged in.");
-  }
-
-  // Check admin role
-  const callerDoc = await db.collection("users").doc(context.auth.uid).get();
-  const callerData = callerDoc.data();
-
-  if (!callerData || callerData.role !== "admin") {
-    throw new functions.https.HttpsError("permission-denied", "Admin access required.");
-  }
-
-  const { jobName } = data;
-  const validJobs = ["dailyUserReport", "weeklyCleanup", "hourlyMetrics"];
-
-  if (!jobName || !validJobs.includes(jobName)) {
-    throw new functions.https.HttpsError(
-      "invalid-argument",
-      `Invalid job. Must be one of: ${validJobs.join(", ")}`
-    );
-  }
-
-  functions.logger.info("Manual job trigger", {
-    adminUid: context.auth.uid,
-    jobName,
-  });
-
-  // Execute the job logic inline
-  if (jobName === "dailyUserReport") {
-    const now = new Date();
-    const oneDayAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000);
-    const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
-
-    const usersSnapshot = await db.collection("users").where("isActive", "==", true).get();
-
-    let totalUsers = 0;
-    let newUsersLast24h = 0;
-    let activeUsersLast7d = 0;
-    const roleBreakdown: Record<string, number> = {};
-
-    usersSnapshot.docs.forEach((doc) => {
-      const userData = doc.data();
-      totalUsers++;
-      const role = userData.role || "unknown";
-      roleBreakdown[role] = (roleBreakdown[role] || 0) + 1;
-      const createdAt = userData.createdAt?.toDate?.();
-      if (createdAt && createdAt > oneDayAgo) newUsersLast24h++;
-      const lastLogin = userData.lastLoginAt?.toDate?.();
-      if (lastLogin && lastLogin > sevenDaysAgo) activeUsersLast7d++;
-    });
-
-    const report = {
-      reportDate: now.toISOString(),
-      metrics: { totalUsers, newUsersLast24h, activeUsersLast7d, inactiveUsers: totalUsers - activeUsersLast7d, roleBreakdown },
-      generatedAt: FieldValue.serverTimestamp(),
-      manualTrigger: true,
-      triggeredBy: context.auth.uid,
-    };
-
-    await db.collection("reports").doc(`daily-${now.toISOString().split("T")[0]}`).set(report);
-    return { success: true, jobName, report: report.metrics };
-  }
-
-  if (jobName === "hourlyMetrics") {
-    const timestamp = new Date();
-    const metrics = {
-      timestamp: timestamp.toISOString(),
-      hour: timestamp.getUTCHours(),
-      usersCollection: (await db.collection("users").count().get()).data().count,
-      reportsCollection: (await db.collection("reports").count().get()).data().count,
-      recordedAt: FieldValue.serverTimestamp(),
-      manualTrigger: true,
-    };
-    await db.collection("metrics").add(metrics);
-    return { success: true, jobName, metrics };
-  }
-
-  return { success: true, jobName, message: "Job executed" };
-});
-
-// ============================================
-// STUDENT CRUD ENDPOINTS (FERPA-Compliant)
-// ============================================
-
-// Create a new student record
-export const createStudent = functions.https.onCall(async (data, context) => {
-  if (!context.auth) {
-    throw new functions.https.HttpsError("unauthenticated", "You must be logged in.");
-  }
-
-  const { firstName, lastName, dateOfBirth, grade, school, district } = data;
-
-  // Validate required fields
-  if (!firstName || !lastName || !dateOfBirth || !grade) {
-    throw new functions.https.HttpsError(
-      "invalid-argument",
-      "firstName, lastName, dateOfBirth, and grade are required."
-    );
-  }
-
-  const studentData = {
-    firstName,
-    lastName,
-    dateOfBirth,
-    grade,
-    school: school || null,
-    district: district || null,
-    createdBy: context.auth.uid,
-    createdAt: FieldValue.serverTimestamp(),
-    updatedAt: FieldValue.serverTimestamp(),
-    isActive: true,
-    // FERPA: Track all access for compliance
-    accessLog: [{
-      action: "created",
-      by: context.auth.uid,
-      at: new Date().toISOString(),
-    }],
-  };
-
-  const docRef = await db.collection("students").add(studentData);
-
-  functions.logger.info("Student created", {
-    studentId: docRef.id,
-    createdBy: context.auth.uid,
-    district,
-  });
-
-  return { success: true, studentId: docRef.id };
-});
-
-// Get students for the current user (with pagination)
-export const getStudents = functions.https.onCall(async (data, context) => {
-  if (!context.auth) {
-    throw new functions.https.HttpsError("unauthenticated", "You must be logged in.");
-  }
-
-  const limit = Math.min(data.limit || 25, 100);
-  const offset = data.offset || 0;
-
-  // Users only see students they created (data isolation)
-  let query = db
-    .collection("students")
-    .where("createdBy", "==", context.auth.uid)
-    .where("isActive", "==", true)
-    .orderBy("createdAt", "desc")
-    .limit(limit);
-
-  if (offset > 0) {
-    const offsetSnapshot = await db
-      .collection("students")
-      .where("createdBy", "==", context.auth.uid)
-      .where("isActive", "==", true)
-      .orderBy("createdAt", "desc")
-      .limit(offset)
-      .get();
-
-    if (offsetSnapshot.docs.length > 0) {
-      const lastDoc = offsetSnapshot.docs[offsetSnapshot.docs.length - 1];
-      query = query.startAfter(lastDoc);
-    }
-  }
-
-  const snapshot = await query.get();
-
-  const students = snapshot.docs.map((doc) => ({
-    id: doc.id,
-    ...doc.data(),
-    // Remove access log from response (internal only)
-    accessLog: undefined,
-  }));
-
-  functions.logger.info("getStudents called", {
-    uid: context.auth.uid,
-    count: students.length,
-  });
-
-  return { students, count: students.length };
-});
-
-// Get a single student by ID
-export const getStudent = functions.https.onCall(async (data, context) => {
-  if (!context.auth) {
-    throw new functions.https.HttpsError("unauthenticated", "You must be logged in.");
-  }
-
-  const { studentId } = data;
-
-  if (!studentId) {
-    throw new functions.https.HttpsError("invalid-argument", "studentId is required.");
-  }
-
-  const studentDoc = await db.collection("students").doc(studentId).get();
-
-  if (!studentDoc.exists) {
-    throw new functions.https.HttpsError("not-found", "Student not found.");
-  }
-
-  const studentData = studentDoc.data();
-
-  // Security: Only allow access to own students (or admin)
-  const callerDoc = await db.collection("users").doc(context.auth.uid).get();
-  const callerRole = callerDoc.data()?.role;
-
-  if (studentData?.createdBy !== context.auth.uid && callerRole !== "admin") {
-    functions.logger.warn("Unauthorized student access attempt", {
-      uid: context.auth.uid,
-      studentId,
-    });
-    throw new functions.https.HttpsError("permission-denied", "Access denied.");
-  }
-
-  // FERPA: Log access
-  await db.collection("students").doc(studentId).update({
-    accessLog: FieldValue.arrayUnion({
-      action: "viewed",
-      by: context.auth.uid,
-      at: new Date().toISOString(),
-    }),
-  });
-
-  functions.logger.info("Student accessed", {
-    studentId,
-    accessedBy: context.auth.uid,
-  });
-
-  return {
-    id: studentDoc.id,
-    ...studentData,
-    accessLog: undefined, // Don't expose log to client
-  };
-});
-
-// Update a student record
-export const updateStudent = functions.https.onCall(async (data, context) => {
-  if (!context.auth) {
-    throw new functions.https.HttpsError("unauthenticated", "You must be logged in.");
-  }
-
-  const { studentId, ...updateFields } = data;
-
-  if (!studentId) {
-    throw new functions.https.HttpsError("invalid-argument", "studentId is required.");
-  }
-
-  const studentDoc = await db.collection("students").doc(studentId).get();
-
-  if (!studentDoc.exists) {
-    throw new functions.https.HttpsError("not-found", "Student not found.");
-  }
-
-  // Security: Only owner can update
-  if (studentDoc.data()?.createdBy !== context.auth.uid) {
-    throw new functions.https.HttpsError("permission-denied", "Access denied.");
-  }
-
-  // Whitelist allowed fields
-  const allowedFields = ["firstName", "lastName", "dateOfBirth", "grade", "school", "district"];
-  const updates: Record<string, unknown> = {};
-
-  for (const field of allowedFields) {
-    if (updateFields[field] !== undefined) {
-      updates[field] = updateFields[field];
-    }
-  }
-
-  if (Object.keys(updates).length === 0) {
-    throw new functions.https.HttpsError("invalid-argument", "No valid fields to update.");
-  }
-
-  updates.updatedAt = FieldValue.serverTimestamp();
-  updates.accessLog = FieldValue.arrayUnion({
-    action: "updated",
-    by: context.auth.uid,
-    at: new Date().toISOString(),
-    fields: Object.keys(updates).filter(f => f !== "accessLog" && f !== "updatedAt"),
-  });
-
-  await db.collection("students").doc(studentId).update(updates);
-
-  functions.logger.info("Student updated", {
-    studentId,
-    updatedBy: context.auth.uid,
-    fields: Object.keys(updates),
-  });
-
-  return { success: true, studentId, updatedFields: Object.keys(updates) };
-});
-
-// Soft delete a student (FERPA: maintain records)
-export const deleteStudent = functions.https.onCall(async (data, context) => {
-  if (!context.auth) {
-    throw new functions.https.HttpsError("unauthenticated", "You must be logged in.");
-  }
-
-  const { studentId } = data;
-
-  if (!studentId) {
-    throw new functions.https.HttpsError("invalid-argument", "studentId is required.");
-  }
-
-  const studentDoc = await db.collection("students").doc(studentId).get();
-
-  if (!studentDoc.exists) {
-    throw new functions.https.HttpsError("not-found", "Student not found.");
-  }
-
-  if (studentDoc.data()?.createdBy !== context.auth.uid) {
-    throw new functions.https.HttpsError("permission-denied", "Access denied.");
-  }
-
-  // Soft delete - FERPA requires record retention
-  await db.collection("students").doc(studentId).update({
-    isActive: false,
-    deletedAt: FieldValue.serverTimestamp(),
-    deletedBy: context.auth.uid,
-    accessLog: FieldValue.arrayUnion({
-      action: "deleted",
-      by: context.auth.uid,
-      at: new Date().toISOString(),
-    }),
-  });
-
-  functions.logger.info("Student soft-deleted", {
-    studentId,
-    deletedBy: context.auth.uid,
-  });
-
-  return { success: true, studentId };
-});
-
-// ============================================
-// ASSESSMENT CRUD ENDPOINTS
-// ============================================
-
-// Create an assessment for a student
-export const createAssessment = functions.https.onCall(async (data, context) => {
-  if (!context.auth) {
-    throw new functions.https.HttpsError("unauthenticated", "You must be logged in.");
-  }
-
-  const { studentId, assessmentType, scores, observations, administeredDate } = data;
-
-  if (!studentId || !assessmentType) {
-    throw new functions.https.HttpsError(
-      "invalid-argument",
-      "studentId and assessmentType are required."
-    );
-  }
-
-  // Verify student exists and user has access
-  const studentDoc = await db.collection("students").doc(studentId).get();
-  if (!studentDoc.exists || studentDoc.data()?.createdBy !== context.auth.uid) {
-    throw new functions.https.HttpsError("permission-denied", "Access denied to student.");
-  }
-
-  const assessmentData = {
-    studentId,
-    assessmentType,
-    scores: scores || {},
-    observations: observations || null,
-    administeredDate: administeredDate || new Date().toISOString(),
-    administeredBy: context.auth.uid,
-    createdAt: FieldValue.serverTimestamp(),
-    updatedAt: FieldValue.serverTimestamp(),
-    status: "draft", // draft, completed, reviewed
-  };
-
-  const docRef = await db.collection("assessments").add(assessmentData);
-
-  functions.logger.info("Assessment created", {
-    assessmentId: docRef.id,
-    studentId,
-    assessmentType,
-    createdBy: context.auth.uid,
-  });
-
-  return { success: true, assessmentId: docRef.id };
-});
-
-// Get assessments for a student
-export const getAssessments = functions.https.onCall(async (data, context) => {
-  if (!context.auth) {
-    throw new functions.https.HttpsError("unauthenticated", "You must be logged in.");
-  }
-
-  const { studentId } = data;
-
-  if (!studentId) {
-    throw new functions.https.HttpsError("invalid-argument", "studentId is required.");
-  }
-
-  // Verify student access
-  const studentDoc = await db.collection("students").doc(studentId).get();
-  if (!studentDoc.exists || studentDoc.data()?.createdBy !== context.auth.uid) {
-    throw new functions.https.HttpsError("permission-denied", "Access denied to student.");
-  }
-
-  const snapshot = await db
-    .collection("assessments")
-    .where("studentId", "==", studentId)
-    .orderBy("createdAt", "desc")
-    .get();
-
-  const assessments = snapshot.docs.map((doc) => ({
-    id: doc.id,
-    ...doc.data(),
-  }));
-
-  return { assessments, count: assessments.length };
-});
-
-// Update assessment status
-export const updateAssessment = functions.https.onCall(async (data, context) => {
-  if (!context.auth) {
-    throw new functions.https.HttpsError("unauthenticated", "You must be logged in.");
-  }
-
-  const { assessmentId, scores, observations, status } = data;
-
-  if (!assessmentId) {
-    throw new functions.https.HttpsError("invalid-argument", "assessmentId is required.");
-  }
-
-  const assessmentDoc = await db.collection("assessments").doc(assessmentId).get();
-  if (!assessmentDoc.exists) {
-    throw new functions.https.HttpsError("not-found", "Assessment not found.");
-  }
-
-  // Verify ownership through student
-  const studentDoc = await db.collection("students").doc(assessmentDoc.data()?.studentId).get();
-  if (!studentDoc.exists || studentDoc.data()?.createdBy !== context.auth.uid) {
-    throw new functions.https.HttpsError("permission-denied", "Access denied.");
-  }
-
-  const updates: Record<string, unknown> = { updatedAt: FieldValue.serverTimestamp() };
-  if (scores !== undefined) updates.scores = scores;
-  if (observations !== undefined) updates.observations = observations;
-  if (status !== undefined && ["draft", "completed", "reviewed"].includes(status)) {
-    updates.status = status;
-  }
-
-  await db.collection("assessments").doc(assessmentId).update(updates);
-
-  functions.logger.info("Assessment updated", {
-    assessmentId,
-    updatedBy: context.auth.uid,
-  });
-
-  return { success: true, assessmentId };
-});
-
-// ============================================
-// EVALUATION REPORT ENDPOINTS
-// ============================================
-
-// Generate an evaluation report for a student
-export const createEvaluationReport = functions.https.onCall(async (data, context) => {
-  if (!context.auth) {
-    throw new functions.https.HttpsError("unauthenticated", "You must be logged in.");
-  }
-
-  const { studentId, reportType, summary, recommendations } = data;
-
-  if (!studentId || !reportType) {
-    throw new functions.https.HttpsError(
-      "invalid-argument",
-      "studentId and reportType are required."
-    );
-  }
-
-  // Verify student access
-  const studentDoc = await db.collection("students").doc(studentId).get();
-  if (!studentDoc.exists || studentDoc.data()?.createdBy !== context.auth.uid) {
-    throw new functions.https.HttpsError("permission-denied", "Access denied to student.");
-  }
-
-  // Get all completed assessments for the student
-  const assessmentsSnapshot = await db
-    .collection("assessments")
-    .where("studentId", "==", studentId)
-    .where("status", "==", "completed")
-    .get();
-
-  const assessmentIds = assessmentsSnapshot.docs.map((doc) => doc.id);
-
-  const reportData = {
-    studentId,
-    reportType, // e.g., "initial-evaluation", "re-evaluation", "progress-report"
-    summary: summary || null,
-    recommendations: recommendations || [],
-    assessmentIds,
-    assessmentCount: assessmentIds.length,
-    createdBy: context.auth.uid,
-    createdAt: FieldValue.serverTimestamp(),
-    updatedAt: FieldValue.serverTimestamp(),
-    status: "draft", // draft, review, finalized
-    version: 1,
-  };
-
-  const docRef = await db.collection("evaluationReports").add(reportData);
-
-  functions.logger.info("Evaluation report created", {
-    reportId: docRef.id,
-    studentId,
-    reportType,
-    assessmentCount: assessmentIds.length,
-    createdBy: context.auth.uid,
-  });
-
-  return { success: true, reportId: docRef.id, assessmentCount: assessmentIds.length };
-});
-
-// Get evaluation reports for a student
-export const getEvaluationReports = functions.https.onCall(async (data, context) => {
-  if (!context.auth) {
-    throw new functions.https.HttpsError("unauthenticated", "You must be logged in.");
-  }
-
-  const { studentId } = data;
-
-  if (!studentId) {
-    throw new functions.https.HttpsError("invalid-argument", "studentId is required.");
-  }
-
-  // Verify student access
-  const studentDoc = await db.collection("students").doc(studentId).get();
-  if (!studentDoc.exists || studentDoc.data()?.createdBy !== context.auth.uid) {
-    throw new functions.https.HttpsError("permission-denied", "Access denied to student.");
-  }
-
-  const snapshot = await db
-    .collection("evaluationReports")
-    .where("studentId", "==", studentId)
-    .orderBy("createdAt", "desc")
-    .get();
-
-  const reports = snapshot.docs.map((doc) => ({
-    id: doc.id,
-    ...doc.data(),
-  }));
-
-  return { reports, count: reports.length };
-});
-
-// Finalize a report (locks it from further edits)
-export const finalizeReport = functions.https.onCall(async (data, context) => {
-  if (!context.auth) {
-    throw new functions.https.HttpsError("unauthenticated", "You must be logged in.");
-  }
-
-  const { reportId } = data;
-
-  if (!reportId) {
-    throw new functions.https.HttpsError("invalid-argument", "reportId is required.");
-  }
-
-  const reportDoc = await db.collection("evaluationReports").doc(reportId).get();
-  if (!reportDoc.exists) {
-    throw new functions.https.HttpsError("not-found", "Report not found.");
-  }
-
-  // Verify ownership through student
-  const studentDoc = await db.collection("students").doc(reportDoc.data()?.studentId).get();
-  if (!studentDoc.exists || studentDoc.data()?.createdBy !== context.auth.uid) {
-    throw new functions.https.HttpsError("permission-denied", "Access denied.");
-  }
-
-  if (reportDoc.data()?.status === "finalized") {
-    throw new functions.https.HttpsError("failed-precondition", "Report is already finalized.");
-  }
-
-  await db.collection("evaluationReports").doc(reportId).update({
-    status: "finalized",
-    finalizedAt: FieldValue.serverTimestamp(),
-    finalizedBy: context.auth.uid,
-    updatedAt: FieldValue.serverTimestamp(),
-  });
-
-  functions.logger.info("Report finalized", {
-    reportId,
-    finalizedBy: context.auth.uid,
-  });
-
-  return { success: true, reportId, status: "finalized" };
-});

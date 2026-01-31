@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Feedback - Anonymous Feedback Collection</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/css/styles.css">
+</head>
+<body>
+  <div class="app">
+    <!-- Navigation -->
+    <nav class="nav">
+      <div class="nav-brand">
+        <a href="/">Feedback</a>
+      </div>
+      <div class="nav-actions" id="navActions">
+        <!-- Populated by JS -->
+      </div>
+    </nav>
+
+    <!-- Main Content -->
+    <main class="main" id="mainContent">
+      <!-- Landing Page (default) -->
+      <section id="landingPage" class="page">
+        <div class="hero">
+          <h1>Collect Anonymous Feedback</h1>
+          <p class="hero-subtitle">Create feedback forms and share them with anyone. Get honest, anonymous responses.</p>
+          <div class="hero-actions">
+            <button class="btn btn-primary btn-lg" onclick="showLogin()">Get Started</button>
+            <a href="#how-it-works" class="btn btn-secondary btn-lg">Learn More</a>
+          </div>
+        </div>
+
+        <section id="how-it-works" class="features">
+          <h2>How It Works</h2>
+          <div class="feature-grid">
+            <div class="feature-card">
+              <div class="feature-icon">1</div>
+              <h3>Create a Form</h3>
+              <p>Sign up and create a feedback form with a title, description, and optional categories.</p>
+            </div>
+            <div class="feature-card">
+              <div class="feature-icon">2</div>
+              <h3>Share the Link</h3>
+              <p>Get a unique link and QR code to share with anyone you want feedback from.</p>
+            </div>
+            <div class="feature-card">
+              <div class="feature-icon">3</div>
+              <h3>Collect Responses</h3>
+              <p>Respondents submit feedback anonymously. No tracking, no identification.</p>
+            </div>
+            <div class="feature-card">
+              <div class="feature-icon">4</div>
+              <h3>View Results</h3>
+              <p>Only you can see the responses. Review feedback in your private dashboard.</p>
+            </div>
+          </div>
+        </section>
+      </section>
+
+      <!-- Login/Register Page -->
+      <section id="authPage" class="page hidden">
+        <div class="auth-container">
+          <h2 id="authTitle">Sign In</h2>
+          <form id="authForm" onsubmit="handleAuth(event)">
+            <div class="form-group">
+              <label for="email">Email</label>
+              <input type="email" id="email" required placeholder="you@example.com">
+            </div>
+            <div class="form-group">
+              <label for="password">Password</label>
+              <input type="password" id="password" required placeholder="Your password" minlength="6">
+            </div>
+            <button type="submit" class="btn btn-primary btn-block" id="authButton">Sign In</button>
+          </form>
+          <p class="auth-switch">
+            <span id="authSwitchText">Don't have an account?</span>
+            <a href="#" onclick="toggleAuthMode(event)">Sign Up</a>
+          </p>
+          <div id="authError" class="error-message hidden"></div>
+        </div>
+      </section>
+
+      <!-- Dashboard Page -->
+      <section id="dashboardPage" class="page hidden">
+        <div class="dashboard-top">
+          <div>
+            <h1 class="dashboard-title">Your Forms</h1>
+            <p class="dashboard-subtitle" id="dashboardSubtitle">Loading...</p>
+          </div>
+          <button class="btn btn-primary" onclick="showCreateForm()">+ Create Form</button>
+        </div>
+        <div id="formsList" class="forms-grid">
+          <!-- Populated by JS -->
+        </div>
+      </section>
+
+      <!-- Create Form Page -->
+      <section id="createFormPage" class="page hidden">
+        <div class="form-container">
+          <h2>Create Feedback Form</h2>
+          <form id="createFeedbackForm" onsubmit="handleCreateForm(event)">
+            <div class="form-group">
+              <label for="formTitle">Title *</label>
+              <input type="text" id="formTitle" required maxlength="200" placeholder="e.g., Team Feedback Q1 2024">
+            </div>
+            <div class="form-group">
+              <label for="formDescription">Description</label>
+              <textarea id="formDescription" maxlength="1000" rows="3" placeholder="Optional: Add context for respondents"></textarea>
+            </div>
+            <div class="form-group checkbox-group">
+              <label>
+                <input type="checkbox" id="allowMultiple">
+                Allow multiple responses from the same person
+              </label>
+            </div>
+            <div class="form-group checkbox-group">
+              <label>
+                <input type="checkbox" id="requireCategory" onchange="toggleCategoryInput()">
+                Require category selection
+              </label>
+            </div>
+            <div class="form-group hidden" id="categoriesGroup">
+              <label for="categories">Categories (comma-separated)</label>
+              <input type="text" id="categories" placeholder="e.g., Positive, Constructive, Suggestion">
+            </div>
+            <div class="form-actions">
+              <button type="button" class="btn btn-secondary" onclick="showDashboard()">Cancel</button>
+              <button type="submit" class="btn btn-primary">Create Form</button>
+            </div>
+          </form>
+        </div>
+      </section>
+
+      <!-- Form Created Success Page -->
+      <section id="formCreatedPage" class="page hidden">
+        <div class="success-container">
+          <div class="success-icon">&#10003;</div>
+          <h2>Form Created!</h2>
+          <p>Share this link with anyone you want to collect feedback from:</p>
+          <div class="share-link">
+            <input type="text" id="shareLink" readonly>
+            <button class="btn btn-secondary" onclick="copyLink()">Copy</button>
+          </div>
+          <div id="qrCode" class="qr-code"></div>
+          <div class="form-actions">
+            <button class="btn btn-primary" onclick="showDashboard()">Go to Dashboard</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- View Responses Page -->
+      <section id="responsesPage" class="page hidden">
+        <div class="responses-header">
+          <button class="btn btn-secondary btn-sm" onclick="showDashboard()">&larr; Back</button>
+          <h2 id="responsesTitle">Responses</h2>
+          <span id="responsesCount" class="badge">0</span>
+        </div>
+
+        <div class="share-section" id="shareSection">
+          <div class="share-section-content">
+            <div class="share-qr" id="responseQrCode"></div>
+            <div class="share-details">
+              <p>Share this link to collect feedback:</p>
+              <div class="share-link">
+                <input type="text" id="responseShareLink" readonly>
+                <button class="btn btn-secondary btn-sm" onclick="copyResponseLink()">Copy</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <h3 class="responses-subtitle">Responses</h3>
+        <div id="responsesList" class="responses-list">
+          <!-- Populated by JS -->
+        </div>
+      </section>
+
+      <!-- Submit Feedback Page (Anonymous) -->
+      <section id="submitPage" class="page hidden">
+        <div class="form-container">
+          <h2 id="submitFormTitle">Submit Feedback</h2>
+          <p id="submitFormDescription" class="form-description"></p>
+          <form id="submitFeedbackForm" onsubmit="handleSubmitFeedback(event)">
+            <div class="form-group hidden" id="submitCategoryGroup">
+              <label for="submitCategory">Category *</label>
+              <select id="submitCategory">
+                <!-- Populated by JS -->
+              </select>
+            </div>
+            <div class="form-group">
+              <label for="feedbackMessage">Your Feedback *</label>
+              <textarea id="feedbackMessage" required maxlength="5000" rows="6" placeholder="Share your thoughts..."></textarea>
+            </div>
+            <button type="submit" class="btn btn-primary btn-block">Submit Anonymously</button>
+          </form>
+          <p class="privacy-note">Your feedback is completely anonymous. We do not track your IP address or any identifying information.</p>
+        </div>
+      </section>
+
+      <!-- Feedback Submitted Success -->
+      <section id="submittedPage" class="page hidden">
+        <div class="success-container">
+          <div class="success-icon">&#10003;</div>
+          <h2>Thank You!</h2>
+          <p>Your feedback has been submitted anonymously.</p>
+        </div>
+      </section>
+
+      <!-- Form Not Found -->
+      <section id="notFoundPage" class="page hidden">
+        <div class="error-container">
+          <h2>Form Not Found</h2>
+          <p>This feedback form doesn't exist or has been deleted.</p>
+          <a href="/" class="btn btn-primary">Go Home</a>
+        </div>
+      </section>
+    </main>
+
+    <!-- Footer -->
+    <footer class="footer">
+      <p>&copy; 2024 Feedback. Built with Firebase.</p>
+    </footer>
+  </div>
+
+  <!-- Firebase SDK -->
+  <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-auth-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-functions-compat.js"></script>
+
+
+  <!-- App -->
+  <script src="/js/app.js"></script>
+</body>
+</html>
